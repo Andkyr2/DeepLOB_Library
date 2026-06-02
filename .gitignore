@@ -11,6 +11,7 @@ env/
 *.pth
 *.ckpt
 
+papers/
 data/
 datasets/
 logs/
