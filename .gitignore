@@ -10,6 +10,7 @@ env/
 *.pt
 *.pth
 *.ckpt
+*.egg-info/
 
 papers/
 data/
