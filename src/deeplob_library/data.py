@@ -4,9 +4,10 @@ import numpy as np
 
 def get_smoothed_midprice_targets(df,k = 100):
     '''
-    df: dataframe of message and orderbook
+    df: dataframe of message and orderbook combined
     k: lookback window
-    returns: dataframe of smoothed midprice targets
+
+    returns: dataframe of smoothed midprice targets with the required columns (removing the message columns)
     '''
     df = df.iloc[:,6:]
     #get midprice
@@ -88,6 +89,10 @@ def combine_message_orderbook(message_df,orderbook_df):
     orderbook_df: dataframe of orderbook file
 
     returns: dataframe of combined message and orderbook
+
+    drops rows with missing values, cuts 30min before and 
+    after market open and drops rows with event type 
+    not in [1,2,3,4,5]
     '''
 
     #concat
@@ -97,11 +102,15 @@ def combine_message_orderbook(message_df,orderbook_df):
         (df['time'] < 15.5*60*60) &
         (df['event_type'].isin([1,2,3,4,5]))
     ]
+    df_regular = df_regular.dropna(axis=0)
+
     return df_regular
 
 #get orderbook for each day and concat into tensors of 100 lookback
 def get_lists_of_tensors(sorted_message_files:list[str],
                         sorted_orderbook_files:list[str],
+                        lookback_window:int = 100,
+                        time_step:int = 10,
                         ) -> tuple[list[torch.Tensor],list[torch.Tensor]]:
 
     '''
@@ -126,11 +135,30 @@ def get_lists_of_tensors(sorted_message_files:list[str],
         
         X = torch.tensor(df.iloc[:,:-1].values).float()
         y = torch.tensor(df.iloc[:,-1].values).float()
-        X = X.unfold(0,100,10).permute(0,2,1)
-        y = y.unfold(0,100,10)[:,-1]
+        X = X.unfold(0,lookback_window,time_step).permute(0,2,1)
+        y = y.unfold(0,lookback_window,time_step)[:,-1]
         tensors_X.append(X)
         tensors_y.append(y)
 
         
     return tensors_X,tensors_y
 
+def get_train_val_test_sets(Xs,ys,val_days:int,test_days:int):
+
+    '''
+    Xs: list of tensors shape (time,lookback_window,features)
+    ys: list of tensors shape (time,)
+    val_days: number of days to use for validation
+    test_days: number of days to use for testing
+
+    returns: tuple of tensors of X_train, y_train, X_val, y_val, X_test, y_test
+
+    '''
+    X_train = torch.cat(Xs[:-val_days-test_days],dim=0)
+    y_train = torch.cat(ys[:-val_days-test_days],dim=0)
+    X_val = torch.cat(Xs[-val_days-test_days:-test_days],dim=0)
+    y_val = torch.cat(ys[-val_days-test_days:-test_days],dim=0)
+    X_test = torch.cat(Xs[-test_days:],dim=0)
+    y_test = torch.cat(ys[-test_days:],dim=0)
+
+    return X_train,y_train,X_val,y_val,X_test,y_test

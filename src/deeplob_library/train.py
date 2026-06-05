@@ -12,6 +12,9 @@ def run_epoch(model,loader,criterion,optimizer,device):
     device: torch.device
 
     returns: avg_loss,acc
+
+    automatically sets model to training mode if optimizer is not None,
+    otherwise sets model to evaluation mode
     '''
     is_training = optimizer is not None
     model.train() if is_training else model.eval()
@@ -79,7 +82,7 @@ def train_model(model,
                                         optimizer,
                                         device)
 
-        val_loss,val_acc = run_epoch(model,val_loader,criterion)
+        val_loss,val_acc = run_epoch(model,val_loader,criterion,None,device)
 
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
@@ -97,6 +100,6 @@ def train_model(model,
     return model,history
 
 def test_model(model,test_loader,criterion,device):
-    test_loss,test_acc = run_epoch(model,test_loader,criterion,device)
+    test_loss,test_acc = run_epoch(model,test_loader,criterion,optimizer=None,device=device)
     print(f"Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
     return test_loss,test_acc
