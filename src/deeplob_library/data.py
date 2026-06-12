@@ -2,12 +2,15 @@ import pandas as pd
 import torch
 import numpy as np
 
-def get_tick_spread_ratio(orderbook_file:str) -> float:
+
+def get_tick_spread_ratio(orderbook_file:str,message_file:str) -> float:
     '''
     orderbook_file: path to orderbook file
     returns: tick_size/spread
     '''
-    df = read_orderbook_file(orderbook_file)
+    orderbook_df = read_orderbook_file(orderbook_file)
+    message_df = read_message_file(message_file)
+    df = combine_message_orderbook(message_df,orderbook_df)
     spread = (df['ask_price_1'] - df['bid_price_1']).mean()
     tick_size = (df['ask_price_2'] - df['ask_price_1']).min()
     return tick_size/spread
@@ -71,7 +74,7 @@ def read_message_file(file_path):
     returns: dataframe of message file
     '''
     message_cols = ["time","event_type","order_id","size","price","direction","extra"]
-    df = pd.read_csv(file_path,names=message_cols)
+    df = pd.read_csv(file_path,names=message_cols,low_memory=False) #low_memory=False avoids the dtype warning for "extra"
     #drop extra column
     df = df.drop(columns=["extra"])
     return df
