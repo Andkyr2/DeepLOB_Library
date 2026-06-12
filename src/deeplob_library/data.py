@@ -2,6 +2,16 @@ import pandas as pd
 import torch
 import numpy as np
 
+def get_tick_spread_ratio(orderbook_file:str) -> float:
+    '''
+    orderbook_file: path to orderbook file
+    returns: tick_size/spread
+    '''
+    df = read_orderbook_file(orderbook_file)
+    spread = (df['ask_price_1'] - df['bid_price_1']).mean()
+    tick_size = (df['ask_price_2'] - df['ask_price_1']).min()
+    return tick_size/spread
+
 def get_smoothed_midprice_targets(df,k = 100):
     '''
     df: dataframe of message and orderbook combined
