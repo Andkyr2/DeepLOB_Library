@@ -72,7 +72,7 @@ class VariationalLSTM(nn.Module):
         return out, (h,c)
 
 class VariationalDeepLOB(nn.Module):
-    def __init__(self, num_classes=3):
+    def __init__(self, num_classes=3,dropout=0.2):
         super().__init__()
 
         self.conv1 = nn.Sequential(
@@ -136,7 +136,7 @@ class VariationalDeepLOB(nn.Module):
             nn.BatchNorm2d(64),
         )
 
-        self.lstm = VariationalLSTM(input_size=192, hidden_size=64, num_layers=1, input_dropout=0.2, recurrent_dropout=0.2, batch_first=True)
+        self.lstm = VariationalLSTM(input_size=192, hidden_size=64, num_layers=1, input_dropout=dropout, recurrent_dropout=dropout, batch_first=True)
         self.fc = nn.Linear(64, num_classes)
 
     def forward(self, x):
