@@ -128,9 +128,7 @@ class DeepLOB(nn.Module):
         x, _ = self.lstm(x)
         x = x[:, -1, :]
         return self.fc(x)
-
         
-
 
 class VariationalLSTM(nn.Module):
     def __init__(
@@ -284,3 +282,208 @@ class VariationalDeepLOB(nn.Module):
         x, _ = self.lstm(x)
         x = x[:, -1, :]
         return self.fc(x)
+
+
+class BiN(nn.Module):
+    '''Bilinear normalizaiton'''
+    def __init__(self,num_features,seq_len):
+        super().__init__()
+        self.d1 = num_features
+        self.t1 = seq_len
+
+        self.B1 = nn.Parameter(torch.zeros(seq_len,1))
+        self.l1 = nn.Parameter(torch.empty(seq_len,1))
+
+        nn.init.xavier_normal_(self.l1)
+
+        self.B2 = nn.Parameter(torch.zeros(num_features,1))
+        self.l2 = nn.Parameter(torch.empty(num_features,1))
+
+        nn.init.xavier_normal_(self.l2)
+
+        self.y1 = nn.Parameter(torch.tensor(0.5))
+        self.y2 = nn.Parameter(torch.tensor(0.5))
+
+    def forward(self,x):
+        #x: (B,num_features,seq_len)
+        y1 = torch.clamp(self.y1,min = 0.0)
+        y2 = torch.clamp(self.y2,min = 0.0)
+
+        #normalize along temporal dimension
+        x2 = x.mean(dim=2,keepdim=True)
+        std2 = x.std(dim=2,keepdim=True)
+        #guard against zero std
+        std2 = torch.where(std2 < 1e-6,torch.ones_like(std2),std2)
+        Z2 = (x - x2) / (std2)
+        #learnable affine
+        X2 = self.l2 * Z2 + self.B2
+
+        
+        #normalize along feature dimension
+        x1 = x.mean(dim=1,keepdim=True)
+        std1 = x.std(dim=1,keepdim=True)
+        #guard against zero std
+        std1 = torch.where(std1 < 1e-6,torch.ones_like(std1),std1)
+        Z1 = (x - x1) / std1
+        #learnable affine
+        X1 = self.l1.T * Z1 + self.B1.T
+
+        return y1 * X1 + y2 * X2
+
+class MLPBlock(nn.Module):
+
+
+    def __init__(self,start_dim,hidden_dim,final_dim):
+        super().__init__()
+        self.fc = nn.Linear(start_dim,hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim,final_dim)
+        self.gelu = nn.GELU()
+        self.ln = nn.LayerNorm(final_dim)
+
+    def forward(self,x):
+        res = x
+        x = self.fc2(self.gelu(self.fc(x)))
+        if x.shape[-1] == res.shape[-1]:
+            x = x + res
+        x = self.ln(x)
+        return self.gelu(x)
+
+def _build_classifier_head(total_dim,num_classes):
+    '''repeatedly shrink by 4x until dim < 128 and then classify'''
+    layers = nn.ModuleList()
+    while total_dim > 128:
+        layers.append(nn.Linear(total_dim,total_dim//4))
+        layers.append(nn.GELU())
+        total_dim //= 4
+    layers.append(nn.Linear(total_dim,num_classes))
+    return layers
+
+class MLPLOB(nn.Module):
+    def __init__(self,hidden_dim = 128, num_layers = 4,seq_len = 100,num_features = 40,num_classes = 3):
+
+        super().__init__()
+        assert hidden_dim % 4 == 0 and seq_len % 4 == 0
+
+        self.norm_layer = BiN(num_features,seq_len)
+        self.proj = nn.Linear(num_features,hidden_dim)
+        self.blocks = nn.ModuleList()
+
+        for i in range(num_layers):
+            last = (i == num_layers - 1)
+            f_mid,f_out = (hidden_dim*2,hidden_dim//4) if last else (hidden_dim*4,hidden_dim)
+            t_mid,t_out = (seq_len*2,seq_len//4) if last else (seq_len*4,seq_len)
+            self.blocks.append(MLPBlock(hidden_dim,f_mid,f_out))
+            self.blocks.append(MLPBlock(seq_len,t_mid,t_out))
+
+
+        total_dim = (hidden_dim//4) * (seq_len//4)
+        self.final_layers = _build_classifier_head(total_dim,num_classes)
+
+
+    def forward(self,x):
+        #x: (B,seq_len,num_features)
+        x = self.norm_layer(x.permute(0,2,1)).permute(0,2,1) #bin expects (B,num_features,seq_len)
+        x = self.proj(x)
+        for i,block in enumerate(self.blocks):
+            if i % 2 == 0:
+                x = block(x)
+            else:
+                x = block(x.permute(0,2,1)).permute(0,2,1)
+        x = x.reshape(x.size(0),-1)
+        for layer in self.final_layers:
+            x = layer(x)
+        return x
+
+
+class ComputeQKV(nn.Module):
+    def __init__(self,hidden_dim,num_heads):
+        super().__init__()
+        self.q = nn.Linear(hidden_dim,num_heads*hidden_dim)
+        self.k = nn.Linear(hidden_dim,num_heads*hidden_dim)
+        self.v = nn.Linear(hidden_dim,num_heads*hidden_dim)
+        
+    
+
+    def forward(self,x):
+        q = self.q(x)
+        k = self.k(x)
+        v = self.v(x)
+        return q,k,v
+
+class TransformerLayer(nn.Module):
+    def __init__(self,hidden_dim,num_heads,final_dim):
+        super().__init__()
+        self.qkv = ComputeQKV(hidden_dim,num_heads)
+        self.attention = nn.MultiheadAttention(hidden_dim*num_heads,num_heads,batch_first=True)
+        self.w0 = nn.Linear(hidden_dim*num_heads,hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.mlp = MLPBlock(hidden_dim,hidden_dim*4,final_dim)
+
+    def forward(self,x):
+        res = x
+        q,k,v = self.qkv(x)
+        x,_ = self.attention(q,k,v)
+        
+        x = self.norm(self.w0(x) + res)
+        x = self.mlp(x)
+        if x.shape[-1] == res.shape[-1]:
+            x = x + res
+        return x
+
+def sinusoidal_positional_embedding(seq_len,dim, n = 10000.0):
+
+    if dim % 2 != 0:
+        raise ValueError("dim must be even")
+    pos  = torch.arange(seq_len).unsqueeze(1)
+    emb = torch.zeros(seq_len,dim)
+    denom = torch.pow(n,torch.arange(0,dim,2)/dim)
+    emb[:,0::2] = torch.sin(pos/denom)
+    emb[:,1::2] = torch.cos(pos/denom)
+    return emb
+
+class TLOB(nn.Module):
+    def __init__(self,hidden_dim = 128, num_layers = 4,seq_len = 100,num_features = 40,num_heads = 1,num_classes =3,sinusoidal = True):
+
+        super().__init__()
+        assert seq_len % 4 == 0 and hidden_dim % 4 == 0
+        self.norm = BiN(num_features,seq_len)
+        self.embed = nn.Linear(num_features,hidden_dim)
+
+        if sinusoidal:
+            self.register_buffer('pos',sinusoidal_positional_embedding(seq_len,hidden_dim))
+        else:
+            self.pos = nn.Parameter(torch.randn(1,seq_len,hidden_dim))
+
+        self.blocks = nn.ModuleList()
+
+        for i in range(num_layers):
+            last = (i == num_layers - 1)
+            h_out = hidden_dim//4 if last else hidden_dim
+            t_out = seq_len//4 if last else seq_len
+            self.blocks.append(TransformerLayer(hidden_dim,num_heads,h_out))
+            self.blocks.append(TransformerLayer(seq_len,num_heads,t_out))
+
+        self.head = _build_classifier_head((hidden_dim//4) * (seq_len//4),num_classes)
+
+    def forward(self,x):
+        #x: (B,seq_len,num_features)
+        x = self.norm(x.permute(0,2,1)).permute(0,2,1)
+        x = self.embed(x) + self.pos
+        for i,block in enumerate(self.blocks):
+            if i % 2 == 0:
+                x = block(x)
+            else:
+                x = block(x.permute(0,2,1)).permute(0,2,1)
+        x = x.reshape(x.size(0),-1)
+        for layer in self.head:
+            x = layer(x)
+
+        return x
+
+#sanity check
+if __name__ == "__main__":
+    x = torch.randn(8,128,40)
+    print(MLPLOB(hidden_dim = 128,seq_len = 128,num_features = 40,num_classes = 3)(x).shape)
+    print(TLOB(hidden_dim = 128,seq_len = 128,num_features = 40,num_classes = 3,sinusoidal = True)(x).shape)
+
+
