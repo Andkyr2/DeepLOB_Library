@@ -119,16 +119,82 @@ def combine_message_orderbook(message_df,orderbook_df):
 
     return df_regular
 
+def get_relative_price_features(df, n_levels = 10):
+
+    '''
+    df has ask_price_1, ... ask_price_10, bid_price_1, ... bid_price_10, ask_size_1, ... ask_size_10, bid_size_1, ... bid_size_10
+    returns a dataframe with the relative price features and log volume features (note return frame does not include targets)
+    '''
+
+    out = pd.DataFrame(index=df.index)
+    mid = (df['bid_price_1'] + df['ask_price_1'])/2
+
+    #robust tick estimate
+
+    delta = (df['ask_price_2'] - df['ask_price_1']).abs().replace(0,np.nan).min()
+
+    for i in range(1,n_levels+1):
+        out[f'ask_dist_{i}'] = (df['ask_price_{i}'] - mid)/delta
+        out[f'bid_dist_{i}'] = (df['bid_price_{i}'] - mid)/delta
+        out[f'ask_logvol_{i}'] = np.log1p(df[f'ask_size_{i}'])
+        out[f'bid_logvol_{i}'] = np.log1p(df[f'bid_size_{i}'])
+    return out
+
+def get_OFI_representation(df, n_levels = 10):
+    """
+    Level-wise OFI from quote changes:
+    e_b = q_b*1{p_b>=p_b_prev} - q_b_prev*1{p_b<=p_b_prev}
+    e_a = -q_a*1{p_a<=p_a_prev} + q_a_prev*1{p_a>=p_a_prev}
+    e   = e_b + e_a   (per level)
+
+    Returns DataFrame (T, n_levels).
+    """
+    out = pd.DataFrame(index=df.index)
+    for i in range(1,n_levels+1):
+        pb ,qb = df[f'bid_price_{i}'],df[f'bid_size_{i}']
+        pa ,qa = df[f'ask_price_{i}'],df[f'ask_size_{i}']
+        
+        pb_p , qb_p = pb.shift(1),qb.shift(1)
+        pa_p , qa_p = pa.shift(1),qa.shift(1)
+        e_b = qb*(pb >= pb_p) - qb_p*(pb <= pb_p)
+        e_a = -qa*(pa <= pa_p) + qa_p*(pa >= pa_p)
+        e = e_b + e_a
+        
+        out[f'ofi_{i}'] = e
+    return out.fillna(0)
+
+
+def build_representation(df,representation_type:str = 'raw', n_levels:int = 10,keep_targets:bool = True):
+    if representation_type == 'raw':
+        return df
+    if representation_type == 'OFI':
+        out = get_OFI_representation(df, n_levels)
+        if keep_targets:
+            target = df['target']
+            out = pd.concat([out,target],axis=1)
+        return out
+    if representation_type == 'relative_price':
+        out = get_relative_price_features(df, n_levels)
+        if keep_targets:
+            target = df['target']
+            out = pd.concat([out,target],axis=1)
+        return out
+    else:
+        raise ValueError(f'Invalid representation type: {representation_type}')
+    
+
 #get orderbook for each day and concat into tensors of 100 lookback
 def get_lists_of_tensors(sorted_message_files:list[str],
                         sorted_orderbook_files:list[str],
                         lookback_window:int = 100,
                         time_step:int = 10,
+                        representation_type:str = 'raw',
                         ) -> tuple[list[torch.Tensor],list[torch.Tensor]]:
 
     '''
     sorted_message_files: list of message files sorted by date
     sorted_orderbook_files: list of orderbook files sorted by date
+    reprentation options: 'raw', 'OFI', 'relative_price'
 
     returns: tuple of lists of tensors of X and y
 
@@ -145,6 +211,7 @@ def get_lists_of_tensors(sorted_message_files:list[str],
         orderbook_df = read_orderbook_file(orderbook_file)
         df = combine_message_orderbook(message_df,orderbook_df)
         df = get_smoothed_midprice_targets(df)
+        df = build_representation(df,representation_type,n_levels = 10,keep_targets = True)
         
         X = torch.tensor(df.iloc[:,:-1].values).float()
         y = torch.tensor(df.iloc[:,-1].values).float()
