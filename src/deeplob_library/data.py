@@ -122,7 +122,7 @@ def combine_message_orderbook(message_df,orderbook_df):
 def get_relative_price_features(df, n_levels = 10):
 
     '''
-    df has ask_price_1, ... ask_price_10, bid_price_1, ... bid_price_10, ask_size_1, ... ask_size_10, bid_size_1, ... bid_size_10
+    df has ask_price_1, ... ask_price_10, bid_price_1, ... bid_price_10, ask_size_1, ... ask_size_10, bid_size_1, ... bid_size_10 (interleaving)
     returns a dataframe with the relative price features and log volume features (note return frame does not include targets)
     '''
 
@@ -134,9 +134,9 @@ def get_relative_price_features(df, n_levels = 10):
     delta = (df['ask_price_2'] - df['ask_price_1']).abs().replace(0,np.nan).min()
 
     for i in range(1,n_levels+1):
-        out[f'ask_dist_{i}'] = (df['ask_price_{i}'] - mid)/delta
-        out[f'bid_dist_{i}'] = (df['bid_price_{i}'] - mid)/delta
+        out[f'ask_dist_{i}'] = (df[f'ask_price_{i}'] - mid)/delta
         out[f'ask_logvol_{i}'] = np.log1p(df[f'ask_size_{i}'])
+        out[f'bid_dist_{i}'] = (df[f'bid_price_{i}'] - mid)/delta
         out[f'bid_logvol_{i}'] = np.log1p(df[f'bid_size_{i}'])
     return out
 
