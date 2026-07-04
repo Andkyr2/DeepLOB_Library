@@ -480,6 +480,89 @@ class TLOB(nn.Module):
 
         return x
 
+class CausalConv1d(nn.Module):
+    def __init__(self,in_ch,out_ch,kernel_size,dilation):
+        super().__init__()
+        self.pad = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_ch,out_ch,kernel_size,dilation=dilation,)
+
+    def forward(self,x):
+        #x: (B,C,T)
+        x = F.pad(x, (self.pad, 0))
+        return self.conv(x)
+
+class TransLOBBlock(nn.Module):
+
+    """One transformer block: masked self-attention + position-wise MLP.
+Mirrors the paper's block:
+    Z = LayerNorm(MultiHead(X) + X)         # attention sublayer + residual
+    out = LayerNorm(MLP(Z) + Z)             # feed-forward sublayer + residual
+The MLP is applied independently to each timestep ("position-wise") and uses
+an inner dim of mlp_ratio*d_model (the paper uses 4*d).
+"""
+    
+    def __init__(self,d_model = 15,num_heads = 3,mlp_ratio = 4,dropout = 0.0):
+        super().__init__()
+        assert d_model % num_heads == 0
+
+
+        self.attn = nn.MultiheadAttention(d_model,num_heads,dropout=dropout,batch_first=True)
+
+        self.norm1 = nn.LayerNorm(d_model)
+
+        self.mlp = nn.Sequential(
+            nn.Linear(d_model,d_model*mlp_ratio),
+            nn.ReLU(),
+            nn.Linear(d_model*mlp_ratio,d_model),
+        )
+        self.norm2 = nn.LayerNorm(d_model)
+
+    def forward(self,x,attn_mask):
+        a, _ = self.attn(x,x,x,attn_mask=attn_mask,need_weights=False)
+        x = self.norm1(a + x)
+        y = self.mlp(x)
+        out = self.norm2(y + x)
+        return out
+
+class TransLOB(nn.Module):
+    """TransLOB (Wallbridge, 2020): dilated causal CNN + masked transformer.
+Pipeline:
+    raw LOB (B, T, F)
+        -> 5 dilated causal convs over time      (local temporal features)
+        -> LayerNorm + concat positional ramp    (gives the transformer position info)
+        -> N transformer blocks w/ causal mask    (global relational reasoning)
+        -> flatten -> MLP head                    (3-class price-move prediction)
+"""
+    def __init__(self,seq_len = 100,num_features = 40,num_classes = 3,conv_filters = 14, num_blocks = 2,num_heads = 3,head_hidden = 64,dropout = 0.1,share_weights = True):
+        super().__init__()
+        self.seq_len = seq_len
+        self.share_weights = share_weights
+
+        dilations = [1,2,4,8,16]
+        convs = []
+        in_ch = num_features
+        for d in dilations:
+            convs += [CausalConv1d(in_ch,conv_filters,kernel_size = 2,dilation = d),nn.ReLU()]
+            in_ch = conv_filters
+        self.convs = nn.Sequential(*convs)
+
+        d_model = conv_filters + 1
+
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+
+        pos = torch.linspace(0,1,seq_len).reshape(1,seq_len,1)
+        self.register_buffer('pos',pos)
+
+        if share_weights:
+            self.block =  TransLOBBlock(d_model,num_heads,dropout = dropout)
+        else:
+            self.blocks = nn.ModuleList()
+            for _ in range(num_blocks):
+                self.blocks.append(TransLOBBlock(d_model,num_heads,dropout = dropout))
+
+        self.num_blocks = num_blocks
+
+        pass
 #sanity check
 if __name__ == "__main__":
     x = torch.randn(8,128,40)
