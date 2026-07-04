@@ -15,22 +15,34 @@ def get_tick_spread_ratio(orderbook_file:str,message_file:str) -> float:
     tick_size = (df['ask_price_2'] - df['ask_price_1']).min()
     return tick_size/spread
 
-def get_smoothed_midprice_targets(df,k = 100):
+def make_targets(mid, past_window=10, future_window=100, shift=1):
     '''
-    df: dataframe of message and orderbook combined
-    k: lookback window
+    Smoothed forward-return target, causal at decision time t.
 
-    returns: dataframe of smoothed midprice targets with the required columns (removing the message columns)
+        reference price = trailing mean of `mid` over the last `past_window` events   (known at t)
+        future price    = mean of `mid` over `future_window` events, starting `shift` events ahead
+        target[t]       = future_price / reference_price - 1
+
+    past_window=1  -> reference is just mid[t] (no lookback leakage).
+    Returns a Series aligned to `mid.index`; warm-up/tail rows are NaN.
     '''
-    df = df.iloc[:,6:]
-    #get midprice
-    df['midprice'] = (df['bid_price_1'] + df['ask_price_1'])/2
-    #get smoothed midprice
-    df['midprice_smooth'] = df['midprice'].rolling(window=k).mean()
-    #get targets
-    df['target'] = df['midprice_smooth'].shift(-k)/df['midprice_smooth'] - 1
+    ref = mid.rolling(past_window).mean()
+    fut = mid.rolling(future_window).mean().shift(-(shift + future_window - 1))
+    return fut / ref - 1
 
-    return df.dropna().drop(columns=['midprice','midprice_smooth'])
+
+def get_smoothed_midprice_targets(df, past_window=10, future_window=100, shift=1):
+    '''
+    df: combined message+orderbook dataframe.
+    past_window / future_window / shift: see make_targets.
+
+    returns: orderbook columns + 'target' (message columns and NaN rows dropped).
+    '''
+    df = df.iloc[:, 6:].copy()
+    mid = (df['bid_price_1'] + df['ask_price_1']) / 2
+    df['target'] = make_targets(mid, past_window=past_window,
+                                future_window=future_window, shift=shift)
+    return df.dropna()
 
 def normalize_train_val_test(X_train,X_val,X_test):
     '''
@@ -68,6 +80,47 @@ def make_target_labels(y_train,y_val,y_test):
                          torch.where(y_test > high_threshold,2,1))
     return y_train.long(),y_val.long(),y_test.long()
 
+def _rolling_ternary_labels(y, lo_q, hi_q, window, min_periods):
+    '''
+    Label a single day's continuous returns against their own trailing
+    rolling quantiles (causal: each point only sees samples before it).
+    y: 1-D tensor of continuous return targets for one day
+    lo_q / hi_q: quantile levels for the down/up thresholds
+    window: rolling window length, in SAMPLES (post-unfold), not raw events
+    min_periods: minimum trailing samples needed before thresholds are defined
+    returns: (labels, valid)
+        labels: int64 tensor, 0=down, 1=flat, 2=up (warm-up rows default to 1)
+        valid:  bool tensor, False for warm-up rows (< min_periods trailing
+                samples, i.e. NaN thresholds) -- use it to drop those rows
+    '''
+    s = pd.Series(y.detach().cpu().numpy())
+    lo = s.rolling(window, min_periods=min_periods).quantile(lo_q).values
+    hi = s.rolling(window, min_periods=min_periods).quantile(hi_q).values
+    vals = s.values
+    lab = np.ones(len(s), dtype=np.int64)
+    lab[vals < lo] = 0
+    lab[vals > hi] = 2
+    valid = ~np.isnan(lo)            # False only during warm-up
+    return torch.from_numpy(lab).to(y.device), torch.from_numpy(valid).to(y.device)
+
+
+def make_rolling_labels_per_day(Xs, ys, lo_q=0.33, hi_q=0.66,
+                                window=None, min_periods=None):
+    '''
+    Per-day rolling-quantile labels with warm-up samples dropped.
+    Returns (Xs_filtered, labels) — two lists aligned day by day.
+    '''
+    if window is None:
+        raise ValueError("`window` (number of trailing samples) is required")
+    if min_periods is None:
+        min_periods = window // 4
+    Xs_out, labels_out = [], []
+    for X, y in zip(Xs, ys):
+        lab, valid = _rolling_ternary_labels(y, lo_q, hi_q, window, min_periods)
+        Xs_out.append(X[valid])
+        labels_out.append(lab[valid])
+    return Xs_out, labels_out
+    
 def read_message_file(file_path):
     '''
     file_path: path to message file
